@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Bubble Pop — LaunchTower</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e; --accent:#58a6ff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:var(--bg); color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow:hidden; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); gap:10px; flex-wrap:wrap; }
+  header h1 { font-size:15px; letter-spacing:1px; }
+  header h1 span { color:var(--accent); }
+  .stats { display:flex; gap:16px; font-size:13px; }
+  .stats b { color:var(--accent); }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:0; }
+  canvas { display:block; touch-action:none; background:#0a0e14; border:1px solid var(--line); }
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:rgba(10,14,20,.82); backdrop-filter:blur(2px); text-align:center; padding:20px; }
+  #overlay h2 { font-size:26px; letter-spacing:2px; }
+  #overlay p { color:var(--dim); font-size:13px; max-width:420px; line-height:1.6; }
+  #overlay .big { font-size:40px; color:var(--accent); }
+  button { background:var(--accent); color:#0d1117; border:none; padding:12px 26px; font-family:inherit; font-size:15px; font-weight:700; cursor:pointer; letter-spacing:1px; }
+  button:hover { filter:brightness(1.15); }
+  footer { padding:6px 14px; text-align:center; font-size:11px; color:var(--dim); background:var(--panel); border-top:1px solid var(--line); }
+  footer a { color:var(--accent); text-decoration:none; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>◉ BUBBLE <span>POP</span></h1>
+    <div class="stats">
+      <div>SCORE <b id="score">0</b></div>
+      <div>BEST <b id="best">0</b></div>
+      <div>SHOTS <b id="shots">0</b></div>
+    </div>
+  </header>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="overlay">
+      <h2>BUBBLE POP</h2>
+      <p>Aim with mouse or touch. Shoot colored pixel bubbles into the grid.<br>
+      Pop groups of <b>3 or more</b> to score — floating clusters drop for bonus points.<br>
+      The ceiling descends every few shots. Don't let bubbles cross the danger line!</p>
+      <button id="startBtn">▶ START</button>
+    </div>
+  </div>
+  <footer>LaunchTower · <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">more pixel tools &amp; games →</a></footer>
+</div>
+<script>
+(function(){
+"use strict";
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const shotsEl = document.getElementById('shots');
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+
+const COLORS = [
+  {name:'red',   c1:'#ff5555', c2:'#a02020'},
+  {name:'blue',  c1:'#5599ff', c2:'#1e4fa0'},
+  {name:'green', c1:'#55dd77', c2:'#1e8a40'},
+  {name:'yellow',c1:'#ffdd55', c2:'#a08a1e'},
+  {name:'purple',c1:'#bb66ff', c2:'#6a2ea0'},
+  {name:'orange',c1:'#ff9944', c2:'#a05a1e'}
+];
+const R = 16;               // bubble radius (world units)
+const COLS = 11;
+const W = COLS * 2 * R;     // world width
+const ROWS = 13;
+const H = ROWS * Math.round(R * 1.732) + 40; // world height
+const DANGER_ROW = ROWS - 3;
+const CEILING_EVERY = 8;   // shots per ceiling drop
+const CEILING_DROP = 1;    // rows dropped
+
+let grid, ceilingOffset, score, best, shots, current, next, flying, particles, state, aimAngle, lastPop;
+best = parseInt(localStorage.getItem('bubblepop_best') || '0', 10);
+bestEl.textContent = best;
+
+function resize(){
+  const stage = document.getElementById('stage');
+  const availW = stage.clientWidth - 8;
+  const availH = stage.clientHeight - 8;
+  const scale = Math.min(availW / W, availH / H);
+  cv.width = Math.round(W * scale);
+  cv.height = Math.round(H * scale);
+  cv.style.width = cv.width + 'px';
+  cv.style.height = cv.height + 'px';
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+window.addEventListener('resize', resize);
+
+function rowY(row){ return R + row * R * 1.732; }
+function colX(col, row){
+  let x = R + col * 2 * R;
+  if (row % 2 === 1) x += R;
+  return x;
+}
+function idx(r,c){ return grid[r][c]; }
+function inBounds(r,c){ return r >= 0 && r < ROWS && c >= 0 && c < COLS; }
+
+function neighbors(r,c){
+  const even = (r % 2 === 0);
+  const offs = even ? [[0,-1],[0,1],[-1,-1],[-1,0],[1,-1],[1,0]]
+                    : [[0,-1],[0,1],[-1,0],[-1,1],[1,0],[1,1]];
+  const out = [];
+  for (const [dr,dc] of offs){
+    const nr = r+dr, nc = c+dc;
+    if (inBounds(nr,nc) && grid[nr][nc] !== null) out.push([nr,nc]);
+  }
+  return out;
+}
+
+function newGrid(){
+  grid = [];
+  const activeColors = COLORS.slice(0, 5);
+  for (let r = 0; r < ROWS; r++){
+    grid.push(new Array(COLS).fill(null));
+  }
+  for (let r = 0; r < 5; r++){
+    for (let c = 0; c < COLS; c++){
+      grid[r][c] = activeColors[Math.floor(Math.random()*activeColors.length)].name;
+    }
+  }
+}
+
+function pickColor(){
+  const present = new Set();
+  for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++) if (grid[r][c]) present.add(grid[r][c]);
+  if (present.size) return [...present][Math.floor(Math.random()*present.size)];
+  return COLORS[0].name;
+}
+
+function reset(){
+  newGrid();
+  ceilingOffset = 0;
+  score = 0;
+  shots = 0;
+  flying = null;
+  particles = [];
+  current = pickColor();
+  next = pickColor();
+  aimAngle = -Math.PI/2;
+  state = 'play';
+  updateHUD();
+}
+
+function updateHUD(){
+  scoreEl.textContent = score;
+  bestEl.textContent = best;
+  shotsEl.textContent = shots;
+}
+
+function shooterPos(){ return { x: W/2, y: H - 30 }; }
+
+function findGroup(sr, sc){
+  const color = grid[sr][sc];
+  if (!color) return [];
+  const seen = new Set();
+  const stack = [[sr,sc]];
+  const group = [];
+  while (stack.length){
+    const [r,c] = stack.pop();
+    const key = r*100+c;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!grid[r][c] || grid[r][c] !== color) continue;
+    group.push([r,c]);
+    for (const [nr,nc] of neighbors(r,c)){
+      if (!seen.has(nr*100+nc)) stack.push([nr,nc]);
+    }
+  }
+  return group;
+}
+
+function dropFloating(){
+  const supported = new Set();
+  // bubbles connected to top row are supported
+  const stack = [];
+  for (let c=0;c<COLS;c++) if (grid[0][c]) stack.push([0,c]);
+  while (stack.length){
+    const [r,c] = stack.pop();
+    const key = r*100+c;
+    if (supported.has(key) || !grid[r][c]) continue;
+    supported.add(key);
+    for (const [nr,nc] of neighbors(r,c)) if (grid[nr][nc]) stack.push([nr,nc]);
+  }
+  let dropped = 0;
+  for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++){
+    if (grid[r][c] && !supported.has(r*100+c)){
+      spawnParticles(colX(c,r), rowY(r), grid[r][c], 6);
+      grid[r][c] = null;
+      dropped++;
+    }
+  }
+  if (dropped){ score += dropped * 20; lastPop = 'DROPPED ' + dropped + '  +' + (dropped*20); }
+}
+
+function spawnParticles(x, y, colorName, n){
+  const col = COLORS.find(c => c.name === colorName) || COLORS[0];
+  for (let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 1 + Math.random()*3;
+    particles.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp - 1, life: 30 + Math.random()*20, c: col.c1 });
+  }
+}
+
+function resolveShot(){
+  // find landing cell: nearest empty cell along the path is complex; use simple grid snap
+  const sx = flying.x, sy = flying.y;
+  // determine row/col by scanning for the closest occupied neighbor or ceiling
+  let bestR = 0, bestC = 0, bestD = Infinity;
+  let landed = false;
+  for (let r=0;r<ROWS;r++){
+    for (let c=0;c<COLS;c++){
+      if (grid[r][c] === null) continue;
+      const dx = colX(c,r) - sx, dy = rowY(r) - sy;
+      const d = dx*dx + dy*dy;
+      if (d < bestD){ bestD = d; bestR = r; bestC = c; }
+    }
+  }
+  // place in the empty cell closest to impact that is adjacent to an occupied cell or row 0
+  let placeR = -1, placeC = -1, pd = Infinity;
+  for (let r=0;r<ROWS;r++){
+    for (let c=0;c<COLS;c++){
+      if (grid[r][c] !== null) continue;
+      const adj = (r === 0) || neighbors(r,c).length > 0;
+      if (!adj) continue;
+      const dx = colX(c,r) - sx, dy = rowY(r) - sy;
+      const d = dx*dx + dy*dy;
+      if (d < pd){ pd = d; placeR = r; placeC = c; }
+    }
+  }
+  if (placeR < 0){ // no valid cell (shouldn't happen) — place at nearest empty
+    for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++){
+      if (grid[r][c] !== null) continue;
+      const dx = colX(c,r)-sx, dy = rowY(r)-sy, d = dx*dx+dy*dy;
+      if (d < pd){ pd = d; placeR = r; placeC = c; }
+    }
+  }
+  if (placeR < 0){ flying = null; return; }
+  grid[placeR][placeC] = flying.color;
+  const group = findGroup(placeR, placeC);
+  if (group.length >= 3){
+    for (const [r,c] of group){
+      spawnParticles(colX(c,r), rowY(r), grid[r][c], 5);
+      grid[r][c] = null;
+    }
+    score += group.length * 10;
+    lastPop = 'POP x' + group.length + '  +' + (group.length*10);
+    dropFloating();
+  } else {
+    lastPop = null;
+  }
+  flying = null;
+  shots++;
+  if (shots % CEILING_EVERY === 0){
+    ceilingOffset++;
+    // push top row down: shift everything down by one row
+    for (let r = ROWS-1; r > 0; r--){
+      grid[r] = grid[r-1].slice();
+    }
+    grid[0] = new Array(COLS).fill(null);
+    // re-fill top row with random bubbles
+    const activeColors = COLORS.slice(0, 5);
+    for (let c=0;c<COLS;c++) grid[0][c] = activeColors[Math.floor(Math.random()*activeColors.length)].name;
+    lastPop = 'CEILING DROPS!';
+  }
+  // game over check: any bubble below danger line
+  for (let r = DANGER_ROW; r < ROWS; r++){
+    for (let c=0;c<COLS;c++){
+      if (grid[r][c]){ gameOver(); return; }
+    }
+  }
+  current = next;
+  next = pickColor();
+  updateHUD();
+}
+
+function gameOver(){
+  state = 'over';
+  if (score > best){ best = score; localStorage.setItem('bubblepop_best', String(best)); }
+  updateHUD();
+  overlay.querySelector('h2').textContent = 'GAME OVER';
+  overlay.querySelector('p').innerHTML = 'Final score <b style="color:var(--accent)">' + score + '</b> · Best ' + best;
+  startBtn.textContent = '↻ PLAY AGAIN';
+  overlay.classList.remove('hidden');
+}
+
+function shoot(){
+  if (state !== 'play' || flying) return;
+  const sp = shooterPos();
+  flying = { x: sp.x, y: sp.y, vx: Math.cos(aimAngle)*14, vy: Math.sin(aimAngle)*14, color: current };
+}
+
+function stepFlying(){
+  if (!flying) return;
+  flying.x += flying.vx;
+  flying.y += flying.vy;
+  // wall bounce
+  if (flying.x < R){ flying.x = R; flying.vx = -flying.vx; }
+  if (flying.x > W - R){ flying.x = W - R; flying.vx = -flying.vx; }
+  // ceiling
+  if (flying.y < R + ceilingOffset * 0){ flying.y = R; flying.vy = -flying.vy; }
+  // collision with grid
+  for (let r=0;r<ROWS;r++){
+    for (let c=0;c<COLS;c++){
+      if (!grid[r][c]) continue;
+      const dx = colX(c,r) - flying.x, dy = rowY(r) - flying.y;
+      if (dx*dx + dy*dy < (R*1.9)*(R*1.9)){ resolveShot(); return; }
+    }
+  }
+  if (flying.y < -R*2){ flying = null; }
+}
+
+function stepParticles(){
+  for (let i = particles.length-1; i >= 0; i--){
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--;
+    if (p.life <= 0) particles.splice(i,1);
+  }
+}
+
+function drawBubble(x, y, colorName, r){
+  const col = COLORS.find(c => c.name === colorName) || COLORS[0];
+  // pixel-style bubble: concentric squares
+  ctx.fillStyle = col.c2;
+  ctx.fillRect(x - r, y - r, r*2, r*2);
+  ctx.fillStyle = col.c1;
+  ctx.fillRect(x - r*0.75, y - r*0.75, r*1.5, r*1.5);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillRect(x - r*0.45, y - r*0.55, r*0.5, r*0.5);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // danger line
+  const dy = rowY(DANGER_ROW);
+  ctx.strokeStyle = 'rgba(255,80,80,0.5)';
+  ctx.setLineDash([8,6]);
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, dy); ctx.lineTo(W, dy); ctx.stroke();
+  ctx.setLineDash([]);
+  // grid bubbles
+  for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++){
+    if (grid[r][c]) drawBubble(colX(c,r), rowY(r), grid[r][c], R);
+  }
+  // shooter
+  const sp = shooterPos();
+  ctx.fillStyle = '#30363d';
+  ctx.fillRect(sp.x - 26, sp.y + 10, 52, 14);
+  if (current) drawBubble(sp.x, sp.y, current, R);
+  // aim line
+  if (state === 'play' && !flying){
+    ctx.strokeStyle = 'rgba(230,237,243,0.35)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4,6]);
+    ctx.beginPath();
+    ctx.moveTo(sp.x, sp.y);
+    ctx.lineTo(sp.x + Math.cos(aimAngle)*120, sp.y + Math.sin(aimAngle)*120);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // flying
+  if (flying) drawBubble(flying.x, flying.y, flying.color, R);
+  // next
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px monospace';
+  ctx.fillText('NEXT', W - 60, H - 44);
+  if (next) drawBubble(W - 42, H - 28, next, 10);
+  // particles
+  for (const p of particles){
+    ctx.globalAlpha = Math.max(0, p.life/50);
+    ctx.fillStyle = p.c;
+    ctx.fillRect(p.x-3, p.y-3, 6, 6);
+  }
+  ctx.globalAlpha = 1;
+  // pop text
+  if (lastPop){
+    ctx.fillStyle = '#58a6ff';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(lastPop, W/2, 26);
+    ctx.textAlign = 'left';
+  }
+}
+
+function loop(){
+  if (state === 'play'){
+    stepFlying();
+    stepParticles();
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function pointerPos(e){
+  const rect = cv.getBoundingClientRect();
+  const scaleX = W / rect.width, scaleY = H / rect.height;
+  const cx = (e.clientX - rect.left) * scaleX;
+  const cy = (e.clientY - rect.top) * scaleY;
+  return { x: cx, y: cy };
+}
+
+cv.addEventListener('mousemove', (e) => {
+  if (state !== 'play') return;
+  const p = pointerPos(e);
+  const sp = shooterPos();
+  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
+  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+});
+cv.addEventListener('click', (e) => {
+  if (state !== 'play') return;
+  const p = pointerPos(e);
+  const sp = shooterPos();
+  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
+  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  shoot();
+});
+cv.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (state !== 'play') return;
+  const t = e.touches[0];
+  const p = pointerPos(t);
+  const sp = shooterPos();
+  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
+  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  shoot();
+}, {passive:false});
+cv.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (state !== 'play') return;
+  const t = e.touches[0];
+  const p = pointerPos(t);
+  const sp = shooterPos();
+  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
+  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+}, {passive:false});
+
+startBtn.addEventListener('click', () => {
+  reset();
+  overlay.classList.add('hidden');
+});
+
+resize();
+reset();
+state = 'menu';
+overlay.classList.remove('hidden');
+loop();
+})();
+</script>
+</body>
+</html>
