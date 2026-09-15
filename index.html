@@ -17,10 +17,12 @@
   #stage { flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:0; }
   canvas { display:block; touch-action:none; background:#0a0e14; border:1px solid var(--line); }
   #overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:rgba(10,14,20,.82); backdrop-filter:blur(2px); text-align:center; padding:20px; }
-  #overlay h2 { font-size:26px; letter-spacing:2px; }
-  #overlay p { color:var(--dim); font-size:13px; max-width:420px; line-height:1.6; }
+  #overlay h2 { font-size:34px; letter-spacing:3px; }
+  #overlay p { color:var(--dim); font-size:14px; max-width:440px; line-height:1.7; }
   #overlay .big { font-size:40px; color:var(--accent); }
-  button { background:var(--accent); color:#0d1117; border:none; padding:12px 26px; font-family:inherit; font-size:15px; font-weight:700; cursor:pointer; letter-spacing:1px; }
+  #overlay .final { font-size:18px; color:var(--text); }
+  #overlay .final b { color:var(--accent); font-size:24px; }
+  button { background:var(--accent); color:#0d1117; border:none; padding:16px 40px; font-family:inherit; font-size:18px; font-weight:700; cursor:pointer; letter-spacing:2px; }
   button:hover { filter:brightness(1.15); }
   footer { padding:6px 14px; text-align:center; font-size:11px; color:var(--dim); background:var(--panel); border-top:1px solid var(--line); }
   footer a { color:var(--accent); text-decoration:none; }
@@ -41,10 +43,9 @@
     <canvas id="cv"></canvas>
     <div id="overlay">
       <h2>BUBBLE POP</h2>
-      <p>Aim with mouse or touch. Shoot colored pixel bubbles into the grid.<br>
-      Pop groups of <b>3 or more</b> to score — floating clusters drop for bonus points.<br>
-      The ceiling descends every few shots. Don't let bubbles cross the danger line!</p>
-      <button id="startBtn">▶ START</button>
+      <p id="ovText">Aim with mouse, touch, or arrow keys — pop <b>3+</b> matching bubbles before the ceiling drops.</p>
+      <div id="ovScore" class="final hidden"></div>
+      <button id="startBtn">▶ PLAY</button>
     </div>
   </div>
   <footer>More free tools &amp; games: <a href="https://pennypenguinapp-beep.github.io/" target="_blank" rel="noopener">LaunchTower</a></footer>
@@ -59,6 +60,8 @@ const bestEl = document.getElementById('best');
 const shotsEl = document.getElementById('shots');
 const overlay = document.getElementById('overlay');
 const startBtn = document.getElementById('startBtn');
+const ovText = document.getElementById('ovText');
+const ovScore = document.getElementById('ovScore');
 
 const COLORS = [
   {name:'red',   c1:'#ff5555', c2:'#a02020'},
@@ -85,9 +88,10 @@ function resize(){
   const stage = document.getElementById('stage');
   const availW = stage.clientWidth - 8;
   const availH = stage.clientHeight - 8;
-  const scale = Math.min(availW / W, availH / H);
-  cv.width = Math.round(W * scale);
-  cv.height = Math.round(H * scale);
+  let scale = Math.min(availW / W, availH / H);
+  if (!isFinite(scale) || scale <= 0) scale = 1;
+  cv.width = Math.max(1, Math.round(W * scale));
+  cv.height = Math.max(1, Math.round(H * scale));
   cv.style.width = cv.width + 'px';
   cv.style.height = cv.height + 'px';
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
@@ -252,6 +256,7 @@ function resolveShot(){
     }
     score += group.length * 10;
     lastPop = 'POP x' + group.length + '  +' + (group.length*10);
+    sfxPop(group.length);
     dropFloating();
   } else {
     lastPop = null;
@@ -283,18 +288,59 @@ function resolveShot(){
 
 function gameOver(){
   state = 'over';
-  if (score > best){ best = score; localStorage.setItem('bubblepop_best', String(best)); }
+  const isNew = score > best;
+  if (isNew){ best = score; localStorage.setItem('bubblepop_best', String(best)); }
   updateHUD();
   overlay.querySelector('h2').textContent = 'GAME OVER';
-  overlay.querySelector('p').innerHTML = 'Final score <b style="color:var(--accent)">' + score + '</b> · Best ' + best;
+  ovText.innerHTML = 'The ceiling got you. ' + (isNew ? '<b style="color:var(--accent)">NEW BEST!</b>' : '');
+  ovScore.innerHTML = 'SCORE <b>' + score + '</b> &nbsp;·&nbsp; BEST <b>' + best + '</b>';
+  ovScore.classList.remove('hidden');
   startBtn.textContent = '↻ PLAY AGAIN';
+  sfxOver();
+  setTimeout(() => overlay.classList.remove('hidden'), 450);
+}
+
+function startGame(){
+  reset();
+  overlay.classList.add('hidden');
+  sfxStart();
+}
+
+function showMenu(){
+  overlay.querySelector('h2').textContent = 'BUBBLE POP';
+  ovText.innerHTML = 'Aim with mouse, touch, or arrow keys — pop <b>3+</b> matching bubbles before the ceiling drops.';
+  ovScore.classList.add('hidden');
+  startBtn.textContent = '▶ PLAY';
   overlay.classList.remove('hidden');
 }
+
+// ---- WebAudio sound cues (no files) ----
+let actx = null;
+function audio(){
+  if (!actx){ try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ actx = null; } }
+  if (actx && actx.state === 'suspended') actx.resume();
+  return actx;
+}
+function beep(freq, dur, type, vol, when){
+  const a = audio(); if (!a) return;
+  const t = a.currentTime + (when || 0);
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'square'; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol || 0.06, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxStart(){ beep(440, 0.09, 'square', 0.05); beep(660, 0.12, 'square', 0.05, 0.09); }
+function sfxPop(n){ beep(520 + Math.min(n,10)*40, 0.08, 'square', 0.06); beep(780 + Math.min(n,10)*40, 0.1, 'square', 0.05, 0.06); }
+function sfxShoot(){ beep(220, 0.05, 'triangle', 0.04); }
+function sfxOver(){ beep(330, 0.15, 'sawtooth', 0.05); beep(220, 0.2, 'sawtooth', 0.05, 0.15); beep(147, 0.3, 'sawtooth', 0.05, 0.32); }
 
 function shoot(){
   if (state !== 'play' || flying) return;
   const sp = shooterPos();
   flying = { x: sp.x, y: sp.y, vx: Math.cos(aimAngle)*14, vy: Math.sin(aimAngle)*14, color: current };
+  sfxShoot();
 }
 
 function stepFlying(){
@@ -410,15 +456,13 @@ cv.addEventListener('mousemove', (e) => {
   if (state !== 'play') return;
   const p = pointerPos(e);
   const sp = shooterPos();
-  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
-  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  aimAngle = clampAim(Math.atan2(p.y - sp.y, p.x - sp.x));
 });
 cv.addEventListener('click', (e) => {
   if (state !== 'play') return;
   const p = pointerPos(e);
   const sp = shooterPos();
-  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
-  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  aimAngle = clampAim(Math.atan2(p.y - sp.y, p.x - sp.x));
   shoot();
 });
 cv.addEventListener('touchstart', (e) => {
@@ -427,8 +471,7 @@ cv.addEventListener('touchstart', (e) => {
   const t = e.touches[0];
   const p = pointerPos(t);
   const sp = shooterPos();
-  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
-  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  aimAngle = clampAim(Math.atan2(p.y - sp.y, p.x - sp.x));
   shoot();
 }, {passive:false});
 cv.addEventListener('touchmove', (e) => {
@@ -437,19 +480,50 @@ cv.addEventListener('touchmove', (e) => {
   const t = e.touches[0];
   const p = pointerPos(t);
   const sp = shooterPos();
-  aimAngle = Math.atan2(p.y - sp.y, p.x - sp.x);
-  if (aimAngle > -0.15) aimAngle = aimAngle < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  aimAngle = clampAim(Math.atan2(p.y - sp.y, p.x - sp.x));
 }, {passive:false});
 
-startBtn.addEventListener('click', () => {
-  reset();
-  overlay.classList.add('hidden');
+startBtn.addEventListener('click', startGame);
+
+// ---- keyboard: arrows aim, space/enter shoot, P pauses ----
+function clampAim(a){
+  if (a > -0.15) a = a < Math.PI/2 ? -0.15 : Math.PI + 0.15;
+  return a;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' '){
+    if (state !== 'play'){ e.preventDefault(); startGame(); return; }
+    e.preventDefault(); shoot(); return;
+  }
+  if (state !== 'play') return;
+  if (e.key === 'ArrowLeft'){ aimAngle = clampAim(aimAngle - 0.08); e.preventDefault(); }
+  else if (e.key === 'ArrowRight'){ aimAngle = clampAim(aimAngle + 0.08); e.preventDefault(); }
+  else if (e.key === 'ArrowUp'){ aimAngle = clampAim(aimAngle - 0.03); e.preventDefault(); }
+  else if (e.key === 'ArrowDown'){ aimAngle = clampAim(aimAngle + 0.03); e.preventDefault(); }
+  else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape'){
+    if (state === 'play'){ state = 'paused'; showPause(); }
+    else if (state === 'paused'){ state = 'play'; overlay.classList.add('hidden'); }
+  }
 });
+
+// ---- pause on tab hidden ----
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && state === 'play'){ state = 'paused'; showPause(); }
+});
+function showPause(){
+  overlay.querySelector('h2').textContent = 'PAUSED';
+  ovText.innerHTML = 'Take a breath. Press <b>P</b> or tap <b>RESUME</b> to continue.';
+  ovScore.innerHTML = 'SCORE <b>' + score + '</b> &nbsp;·&nbsp; BEST <b>' + best + '</b>';
+  ovScore.classList.remove('hidden');
+  startBtn.textContent = '▶ RESUME';
+  startBtn.onclick = () => { state = 'play'; overlay.classList.add('hidden'); startBtn.onclick = startGame; };
+  overlay.classList.remove('hidden');
+}
 
 resize();
 reset();
 state = 'menu';
-overlay.classList.remove('hidden');
+showMenu();
 loop();
 })();
 </script>
